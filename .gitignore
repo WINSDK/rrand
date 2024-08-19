@@ -1,0 +1,6 @@
+*.i64
+*.til
+*.nam
+*.id*
+*.dSYM/
+*target/
