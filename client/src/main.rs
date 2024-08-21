@@ -1,11 +1,13 @@
+use std::ffi::CString;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
 
 use loader::VM;
+use relocs::RelocationKind;
 use rsa::pkcs8::EncodePublicKey;
 use rsa::{Pkcs1v15Encrypt, RsaPrivateKey, RsaPublicKey};
-use object::{LittleEndian, Object, ObjectSegment};
+use object::{LittleEndian, Object, ObjectSection, ObjectSegment};
 use object::read::macho::MachOFile64;
 
 mod relocs;
@@ -20,6 +22,8 @@ pub enum Error {
     PubkeyCorrupt,
     Decryption,
     SegmentRead,
+    LoadLibrary,
+    LoadSymbol,
 }
 
 const ENC_SIZE: usize = 256;
@@ -55,6 +59,23 @@ fn write_flattened_binary(obj: &MachOFile64<LittleEndian>) -> Result<VM, loader:
     Ok(vm)
 }
 
+fn load_lib_and_func(library: &str, sym_name: &str) -> Result<u64, Error> {
+    let c_lib = CString::new(library).map_err(|_| Error::LoadLibrary)?;
+    let lib = unsafe { libc::dlopen(c_lib.as_ptr(), libc::RTLD_NOW) };
+    if lib.is_null() {
+        return Err(Error::LoadLibrary);
+    }
+
+    let sym_name = sym_name.strip_prefix("_").unwrap_or(sym_name); // this is scuffed
+    let c_sym_name = CString::new(sym_name).map_err(|_| Error::LoadSymbol)?;
+    let func = unsafe { libc::dlsym(lib, c_sym_name.as_ptr()) };
+    if lib.is_null() {
+        return Err(Error::LoadSymbol);
+    }
+
+    Ok(func as u64)
+}
+
 // format:
 //
 // sections* ->
@@ -71,14 +92,41 @@ fn load_bin() {
     file.read_to_end(&mut data).unwrap();
 
     let obj = MachOFile64::<LittleEndian>::parse(&*data).unwrap();
+
+    for section in obj.sections() {
+        if section.relocations().next().is_some() {
+            panic!("No support for traditional relocations.");
+        }
+    }
+
     let mut vm = write_flattened_binary(&obj).unwrap();
 
     for reloc in relocs::parse_chained_fixups(&obj).unwrap() {
-        let _ = vm.write(reloc.target, &reloc.value);
-        assert_eq!(reloc.value, vm.read(reloc.target).unwrap());
+        match reloc.kind {
+            RelocationKind::Bind { mut value } => {
+                value += vm.address();
+                vm.write(reloc.target, &value).unwrap();
+            }
+            RelocationKind::RebaseLocal { .. } => todo!("rebase local"),
+            RelocationKind::RebaseExtern { library, sym_name, weak } => {
+                match load_lib_and_func(library, sym_name) {
+                    Err(err) if weak => {
+                        println!("{err:?}");
+                        continue;
+                    }
+                    Err(err) => panic!("{err:?}"),
+                    Ok(func) => {
+                        vm.write(reloc.target, &func).unwrap();
+                    }
+                }
+
+            }
+        }
     }
 
-    unsafe { vm.exec(obj.entry() as usize).unwrap() }
+    // 0x0000000000003e60
+    let exit_code = unsafe { vm.exec(obj.entry()).unwrap() };
+    println!("Program exited with code: {exit_code}");
 }
 
 fn main() -> Result<(), Error> {
@@ -115,7 +163,7 @@ fn main() -> Result<(), Error> {
         .map_err(|_| Error::Decryption)?;
     let payload_len = u64::from_be_bytes(payload_len.try_into().unwrap());
 
-    println!("Received payload size {payload_len}");
+    println!("Received payload size {payload_len}.");
 
     load_bin();
 

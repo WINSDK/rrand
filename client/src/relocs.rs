@@ -88,9 +88,25 @@ const DYLD_CHAINED_PTR_START_MULTI: u16 = 0x8000;
 const DYLD_CHAINED_PTR_START_LAST: u16 = 0x8000;
 
 #[derive(Debug)]
-pub struct Relocation {
+pub enum RelocationKind<'data> {
+    Bind {
+        value: u64,
+    },
+    RebaseLocal {
+        sym_name: &'data str,
+        weak: bool,
+    },
+    RebaseExtern {
+        library: &'data str,
+        sym_name: &'data str,
+        weak: bool,
+    },
+}
+
+#[derive(Debug)]
+pub struct Relocation<'data> {
     pub target: usize,
-    pub value: u64,
+    pub kind: RelocationKind<'data>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -283,11 +299,9 @@ fn parse_page_starts_table_starts(page_starts: u64, page_count: u64, data: &[u8]
     page_start_offs
 }
 
-fn load_necessary_dylibs(dylibs: Vec<&str>) {
-    for import in dylibs {}
-}
-
-pub fn parse_chained_fixups(obj: &MachOFile64<LE>) -> Result<Vec<Relocation>, object::Error> {
+pub fn parse_chained_fixups<'data>(
+    obj: &MachOFile64<'data, LE>,
+) -> Result<Vec<Relocation<'data>>, object::Error> {
     let mut relocs = Vec::new();
 
     let (Some(chained_fixups), dylibs) = find_required_lcmds(obj)? else {
@@ -309,18 +323,17 @@ pub fn parse_chained_fixups(obj: &MachOFile64<LE>) -> Result<Vec<Relocation>, ob
     };
 
     let imports_addr = data_off + fixups_header.imports_offset as u64;
-    let import_table_size = fixups_header.imports_count as u64;
+    let imports_count = fixups_header.imports_count as u64;
+    let imports_format = fixups_header.imports_format;
     let chained_fixups_size = chained_fixups.datasize.get(endian) as u64;
 
-    if import_table_size > chained_fixups_size {
+    if imports_count > chained_fixups_size {
         println!("[macho::parse_chained_fixups] Binary is malformed.");
         return Ok(relocs);
     }
 
     let symbols_off = fixups_header.symbols_offset as u64;
     let symbols_addr = data_off + symbols_off;
-    let imports_count = fixups_header.imports_count as u64;
-    let imports_format = fixups_header.imports_format;
 
     let parse_import_fn = match imports_format {
         DYLD_CHAINED_IMPORT => parse_chained_import,
@@ -465,20 +478,30 @@ pub fn parse_chained_fixups(obj: &MachOFile64<LE>) -> Result<Vec<Relocation>, ob
                             continue;
                         }
 
-                        let Some(module) = dylibs.get(entry.lib_ordinal as usize) else {
+                        let Some(library) = dylibs.get(entry.lib_ordinal as usize) else {
                             println!(
                                 "[macho::parse_chained_fixups] Import table entry at \
-                                      {target_addr:#x} is corrupt."
+                                     {target_addr:#x} is corrupt."
                             );
                             continue;
                         };
 
-                        println!("Symbol fixup found: {}.", entry.name);
-                        println!("Library name: {}.", module);
-                        println!("Addr: {:#X}.", target_addr + entry.addend);
+                        relocs.push(Relocation {
+                            target: (target_addr + entry.addend) as usize,
+                            kind: if entry.lib_ordinal == 253 || entry.lib_ordinal == 0 {
+                                RelocationKind::RebaseLocal {
+                                    sym_name: entry.name,
+                                    weak: entry.weak,
+                                }
+                            } else {
+                                RelocationKind::RebaseExtern {
+                                    library,
+                                    sym_name: entry.name,
+                                    weak: entry.weak,
+                                }
+                            },
+                        });
                     } else {
-                        // Rebase instead of bind.
-
                         let entry_addr = match starts.pointer_format {
                             DYLD_CHAINED_PTR_ARM64E
                             | DYLD_CHAINED_PTR_ARM64E_KERNEL
@@ -516,12 +539,12 @@ pub fn parse_chained_fixups(obj: &MachOFile64<LE>) -> Result<Vec<Relocation>, ob
                         //      add_relocated_pointer(chain_entry_addr, entry_offset);
                         // }
 
-                        let reloc = Relocation {
+                        relocs.push(Relocation {
+                            kind: RelocationKind::Bind {
+                                value: entry_addr - real_base_addr,
+                            },
                             target: (chain_entry_addr + base_addr) as usize,
-                            value: entry_addr - real_base_addr,
-                        };
-                        println!("value: {:#X} -- target: {:#X}", reloc.value, reloc.target);
-                        relocs.push(reloc);
+                        });
                     }
 
                     chain_entry_addr += next_entry_stride_count * stride_size;
