@@ -4,3 +4,4 @@
 *.id*
 *.dSYM/
 *target/
+.DS_Store

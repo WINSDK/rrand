@@ -6,7 +6,15 @@ use std::mem;
 use std::ptr;
 use std::sync::LazyLock;
 
+use object::macho;
+use object::Object;
+use object::ObjectSection;
+use object::ObjectSegment;
 use object::{pod, Pod};
+use object::read::macho::MachOFile64;
+use object::LittleEndian as LE;
+
+use crate::relocs::{parse_chained_fixups, RelocationKind};
 
 pub type ExitCode = i32;
 
@@ -20,9 +28,14 @@ pub enum Error {
     OutOfBoundWrite,
     OutOfBoundRead,
     ReadAlignment,
+    LoadLibrary,
+    LoadSymbol,
+    InitTLV,
+    ParseRelocations,
 }
 
 extern "C" {
+    fn tlv_get_addr(desc: *mut TLVDescriptor) -> *mut c_void;
     fn sys_icache_invalidate(start: *mut c_void, size: usize);
 }
 
@@ -38,19 +51,19 @@ enum WriteKind<'a> {
 
 struct WriteOp<'a> {
     vm: &'a mut VM,
-    addr: usize,
-    ty: WriteKind<'a>,
+    offset: usize,
+    kind: WriteKind<'a>,
 }
 
 extern "C" fn writing_callback(ctx: *mut c_void) -> i32 {
-    let WriteOp { vm, addr, ty } = unsafe { &mut *(ctx as *mut WriteOp) };
+    let WriteOp { vm, offset, kind: ty } = unsafe { &mut *(ctx as *mut WriteOp) };
 
     match ty {
         WriteKind::Copy(bytes) => {
-            vm.region[*addr..][..bytes.len()].copy_from_slice(bytes);
+            vm.region[*offset..][..bytes.len()].copy_from_slice(bytes);
         }
         WriteKind::Set { val, size } => {
-            vm.region[*addr..][..*size].fill(*val);
+            vm.region[*offset..][..*size].fill(*val);
         }
     }
     0
@@ -79,8 +92,8 @@ impl Allocation<'_> {
 
         let write_op = WriteOp {
             vm: self.vm,
-            addr: self.offset,
-            ty: WriteKind::Copy(bytes),
+            offset: self.offset,
+            kind: WriteKind::Copy(bytes),
         };
         write_op.commit();
         Ok(())
@@ -94,8 +107,8 @@ impl Allocation<'_> {
         let bytes = pod::bytes_of(val);
         let write_op = WriteOp {
             vm: self.vm,
-            addr: self.offset,
-            ty: WriteKind::Copy(bytes),
+            offset: self.offset,
+            kind: WriteKind::Copy(bytes),
         };
         write_op.commit();
         Ok(())
@@ -104,8 +117,8 @@ impl Allocation<'_> {
     pub fn set_value(&mut self, val: u8) {
         let write_op = WriteOp {
             vm: self.vm,
-            addr: self.offset,
-            ty: WriteKind::Set {
+            offset: self.offset,
+            kind: WriteKind::Set {
                 val,
                 size: self.size,
             },
@@ -113,7 +126,7 @@ impl Allocation<'_> {
         write_op.commit();
     }
 
-    fn address(&self) -> u64 {
+    pub fn address(&self) -> u64 {
         self.vm.region.as_ptr() as u64 + self.offset as u64
     }
 }
@@ -184,8 +197,8 @@ impl VM {
         let bytes = pod::bytes_of(val);
         let write_op = WriteOp {
             vm: self,
-            addr,
-            ty: WriteKind::Copy(bytes),
+            offset: addr,
+            kind: WriteKind::Copy(bytes),
         };
         write_op.commit();
         Ok(())
@@ -196,10 +209,89 @@ impl VM {
             .ok_or(Error::OutOfBoundWrite)?;
         let write_op = WriteOp {
             vm: self,
-            addr,
-            ty: WriteKind::Copy(bytes),
+            offset: addr,
+            kind: WriteKind::Copy(bytes),
         };
         write_op.commit();
+        Ok(())
+    }
+
+    pub fn relocate(&mut self, obj: &MachOFile64<LE>) -> Result<(), Error> {
+        for reloc in parse_chained_fixups(&obj).map_err(|_| Error::ParseRelocations)? {
+            match reloc.kind {
+                RelocationKind::Bind { mut value } => {
+                    value += self.address();
+                    self.write(reloc.target, &value)?;
+                }
+                RelocationKind::RebaseLocal { .. } => todo!("rebase local"),
+                RelocationKind::RebaseExtern { library, sym_name, weak } => {
+                    match load_lib_and_func(library, sym_name) {
+                        Err(err) if weak => {
+                            println!("{err:?}");
+                            continue;
+                        }
+                        Err(err) => panic!("{err:?}"),
+                        Ok(func) => {
+                            self.write(reloc.target, &func)?;
+                        }
+                    }
+
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn exec_init_funcs(&mut self, obj: &MachOFile64<LE>) -> Result<(), Error> {
+        let base_addr = parse_base_addr(obj);
+
+        let mut key = 0;
+        for section in obj.sections() {
+            let flags = section.macho_section().flags.get(LE);
+
+            if flags & macho::SECTION_TYPE != macho::S_THREAD_LOCAL_VARIABLES {
+                continue;
+            }
+
+            if section.size() == 0 {
+                continue;
+            }
+
+            if key == 0 {
+                if unsafe { libc::pthread_key_create(&mut key, Some(libc::free)) } != 0 {
+                    return Err(Error::InitTLV);
+                }
+            }
+
+            let addr = self.address() + (section.address() - base_addr);
+
+            for offset in (0..section.size() as usize).step_by(mem::size_of::<TLVDescriptor>()) {
+                let tlv_desc = unsafe { &*((addr + offset as u64) as *mut TLVDescriptor) };
+                let tlv_desc = TLVDescriptor {
+                    thunk: tlv_get_addr,
+                    key,
+                    offset: tlv_desc.offset,
+                };
+                WriteOp {
+                    vm: self,
+                    offset: (section.address() - base_addr) as usize + offset,
+                    kind: WriteKind::Copy(pod::bytes_of(&tlv_desc)),
+                }.commit();
+            }
+        }
+
+        for section in  obj.sections() {
+            match section.macho_section().flags.get(LE) & macho::SECTION_TYPE {
+                macho::S_MOD_INIT_FUNC_POINTERS => println!("S_MOD_INIT_FUNC_POINTERS"),
+                macho::S_INIT_FUNC_OFFSETS => {
+                    println!("S_INIT_FUNC_OFFSETS");
+                },
+                macho::S_MOD_TERM_FUNC_POINTERS => println!("S_MOD_TERM_FUNC_POINTERS"),
+                _ => continue,
+            }
+        }
+
         Ok(())
     }
 
@@ -216,23 +308,40 @@ impl VM {
         // We empty out the program name, might produce weird results on some binaries.
         let argv = [c"".as_ptr(), ptr::null()];
 
-        // let stack_size = 1024 * 1024 * 4;
-        // let stack_addr = self.alloc(stack_size)?.address(); // + stack_size as u64;
+        let stack_size = 1024 * 1024 * 4;
+        let stack = vec![0u8; stack_size];
 
-        // // // Align stack.
-        // let stack_addr = (stack_addr - 15) & !15;
+        // Align stack.
+        let stack_addr = (stack.as_ptr() as usize + 15) & !15;
+
+        let base_addr = self.address();
 
         // // Required for arm chips as to invalid the instruction cache.
-        let base_addr = self.address();
         sys_icache_invalidate(base_addr as *mut c_void, self.region.len());
 
         let entrypoint = base_addr + entrypoint;
+
+        println!("Binary loaded at {base_addr:#X}");
         println!("Entering entrypoint at {entrypoint:#X}");
 
         let mut exit_code: i32;
+
         std::arch::asm!("
+            // Save stack pointer.
+            mov x3, sp
+            adrp x4, saved_sp@PAGE
+            str x3, [x4, saved_sp@PAGEOFF]
+
+            mov sp, {stack}
+            mov x29, {entry}
             blr {entry}
+
+            // Restore stack pointer.
+            adrp x4, saved_sp@PAGE
+            ldr x3, [x4, saved_sp@PAGEOFF]
+            mov sp, x3
             ",
+            stack = in(reg) stack_addr,
             entry = in(reg) entrypoint,
             in("w0") argv.len() - 1,
             in("x1") argv.as_ptr(),
@@ -241,27 +350,56 @@ impl VM {
             clobber_abi("system"),
         );
 
-        //
-        // std::arch::asm!("
-        //     blr x4
-
-        //     // Handle the return value of main, call exit(),
-        //     mov x8, #93
-        //     svc #0",
-        //     in("w0") 1i32,
-        //     in("x1") argv_entry_addr,
-        //     in("x2") envp_entry_addr,
-        //     in("x3") stack_addr,
-        //     in("x4") entrypoint,
-        //     options(noreturn),
-        // );
-
         Ok(exit_code)
     }
 }
+
+std::arch::global_asm!("
+.data
+.p2align 3
+saved_sp:
+    .8byte 0
+");
 
 impl Drop for VM {
     fn drop(&mut self) {
         unsafe { libc::munmap(self.region.as_mut_ptr() as *mut c_void, self.region.len()) };
     }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct TLVDescriptor {
+    thunk: unsafe extern "C" fn(*mut TLVDescriptor) -> *mut c_void,
+    key: u64,
+    offset: u64,
+}
+
+unsafe impl Pod for TLVDescriptor {}
+
+fn parse_base_addr(obj: &MachOFile64<LE>) -> u64 {
+    for segment in obj.segments() {
+        if let Ok(Some(b"__TEXT")) = segment.name_bytes() {
+            return segment.address();
+        }
+    }
+
+    0
+}
+
+fn load_lib_and_func(library: &str, sym_name: &str) -> Result<u64, Error> {
+    let c_lib = CString::new(library).map_err(|_| Error::LoadLibrary)?;
+    let lib = unsafe { libc::dlopen(c_lib.as_ptr(), libc::RTLD_NOW) };
+    if lib.is_null() {
+        return Err(Error::LoadLibrary);
+    }
+
+    let sym_name = sym_name.strip_prefix("_").unwrap_or(sym_name); // this is scuffed
+    let c_sym_name = CString::new(sym_name).map_err(|_| Error::LoadSymbol)?;
+    let func = unsafe { libc::dlsym(lib, c_sym_name.as_ptr()) };
+    if lib.is_null() {
+        return Err(Error::LoadSymbol);
+    }
+
+    Ok(func as u64)
 }

@@ -1,7 +1,6 @@
 use object::macho::{self, LinkeditDataCommand};
 use object::read::macho::{MachHeader, MachOFile64};
 use object::{Object, ObjectSegment, ReadRef};
-
 use object::LittleEndian as LE;
 
 #[derive(Debug, Clone, Copy)]

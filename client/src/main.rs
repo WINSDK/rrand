@@ -1,14 +1,13 @@
-use std::ffi::CString;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
 
 use loader::VM;
-use relocs::RelocationKind;
 use rsa::pkcs8::EncodePublicKey;
 use rsa::{Pkcs1v15Encrypt, RsaPrivateKey, RsaPublicKey};
-use object::{LittleEndian, Object, ObjectSection, ObjectSegment};
+use object::{macho, Object, ObjectSegment};
 use object::read::macho::MachOFile64;
+use object::LittleEndian as LE;
 
 mod relocs;
 mod loader;
@@ -22,13 +21,11 @@ pub enum Error {
     PubkeyCorrupt,
     Decryption,
     SegmentRead,
-    LoadLibrary,
-    LoadSymbol,
 }
 
 const ENC_SIZE: usize = 256;
 
-fn write_flattened_binary(obj: &MachOFile64<LittleEndian>) -> Result<VM, loader::Error> {
+fn write_flattened_binary(obj: &MachOFile64<LE>) -> Result<VM, loader::Error> {
     let mut segments = Vec::new();
     for segment in obj.segments() {
         if let Ok(Some("__PAGEZERO")) = segment.name() {
@@ -52,28 +49,13 @@ fn write_flattened_binary(obj: &MachOFile64<LittleEndian>) -> Result<VM, loader:
         if pad_size > 0 {
             vm.alloc(pad_size as usize)?.set_value(0);
         }
-        vm.alloc(bytes.len())?.write_slice(bytes)?;
+        let mut alloc = vm.alloc(bytes.len())?;
+        alloc.write_slice(bytes)?;
+        println!("segment allocated at {:#X}", alloc.address());
         end_of_prev_segment = addr + bytes.len() as u64;
     }
 
     Ok(vm)
-}
-
-fn load_lib_and_func(library: &str, sym_name: &str) -> Result<u64, Error> {
-    let c_lib = CString::new(library).map_err(|_| Error::LoadLibrary)?;
-    let lib = unsafe { libc::dlopen(c_lib.as_ptr(), libc::RTLD_NOW) };
-    if lib.is_null() {
-        return Err(Error::LoadLibrary);
-    }
-
-    let sym_name = sym_name.strip_prefix("_").unwrap_or(sym_name); // this is scuffed
-    let c_sym_name = CString::new(sym_name).map_err(|_| Error::LoadSymbol)?;
-    let func = unsafe { libc::dlsym(lib, c_sym_name.as_ptr()) };
-    if lib.is_null() {
-        return Err(Error::LoadSymbol);
-    }
-
-    Ok(func as u64)
 }
 
 // format:
@@ -85,44 +67,25 @@ fn load_lib_and_func(library: &str, sym_name: &str) -> Result<u64, Error> {
 //  data
 fn load_bin() {
     let mut path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    path.push("../simple");
+    path.push("../ptrace");
 
     let mut file = std::fs::File::open(path).unwrap();
     let mut data = Vec::new();
     file.read_to_end(&mut data).unwrap();
 
-    let obj = MachOFile64::<LittleEndian>::parse(&*data).unwrap();
+    let obj = MachOFile64::parse(&*data).unwrap();
 
-    for section in obj.sections() {
-        if section.relocations().next().is_some() {
-            panic!("No support for traditional relocations.");
+    for lcmd in obj.macho_load_commands().unwrap() {
+        if let Ok(macho::LC_DYLD_INFO | macho::LC_DYLD_INFO_ONLY) = lcmd.map(|cmd| cmd.cmd()) {
+            panic!("Traditional dynamic relocations aren't supported, \
+                    only codegen by xcode >= 12.0.")
         }
     }
 
     let mut vm = write_flattened_binary(&obj).unwrap();
 
-    for reloc in relocs::parse_chained_fixups(&obj).unwrap() {
-        match reloc.kind {
-            RelocationKind::Bind { mut value } => {
-                value += vm.address();
-                vm.write(reloc.target, &value).unwrap();
-            }
-            RelocationKind::RebaseLocal { .. } => todo!("rebase local"),
-            RelocationKind::RebaseExtern { library, sym_name, weak } => {
-                match load_lib_and_func(library, sym_name) {
-                    Err(err) if weak => {
-                        println!("{err:?}");
-                        continue;
-                    }
-                    Err(err) => panic!("{err:?}"),
-                    Ok(func) => {
-                        vm.write(reloc.target, &func).unwrap();
-                    }
-                }
-
-            }
-        }
-    }
+    vm.relocate(&obj).unwrap();
+    vm.exec_init_funcs(&obj).unwrap();
 
     // 0x0000000000003e60
     let exit_code = unsafe { vm.exec(obj.entry()).unwrap() };
