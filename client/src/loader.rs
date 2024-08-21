@@ -312,11 +312,11 @@ impl VM {
         let stack = vec![0u8; stack_size];
 
         // Align stack.
-        let stack_addr = (stack.as_ptr() as usize + 15) & !15;
+        let stack_addr = ((stack.as_ptr() as usize + stack_size) + 15) & !15;
 
         let base_addr = self.address();
 
-        // // Required for arm chips as to invalid the instruction cache.
+        // Required for arm chips as to invalid the instruction cache.
         sys_icache_invalidate(base_addr as *mut c_void, self.region.len());
 
         let entrypoint = base_addr + entrypoint;
@@ -327,18 +327,26 @@ impl VM {
         let mut exit_code: i32;
 
         std::arch::asm!("
-            // Save stack pointer.
             mov x3, sp
-            adrp x4, saved_sp@PAGE
-            str x3, [x4, saved_sp@PAGEOFF]
 
+            // Set allocated stack.
             mov sp, {stack}
+
+            // Save stack and frame pointer.
+            sub sp, sp, 16
+            stp x3, x29, [sp]
+
+            // Set frame pointer to hide backtrace.
             mov x29, {entry}
+
+            // Call entrypoint.
             blr {entry}
 
-            // Restore stack pointer.
-            adrp x4, saved_sp@PAGE
-            ldr x3, [x4, saved_sp@PAGEOFF]
+            // Restore stack and frame pointer.
+            ldp x3, x29, [sp]
+            add sp, sp, 16
+
+            // Set old stack pointer (old stack must also stay aligned).
             mov sp, x3
             ",
             stack = in(reg) stack_addr,
@@ -350,16 +358,11 @@ impl VM {
             clobber_abi("system"),
         );
 
+        println!(":)");
+
         Ok(exit_code)
     }
 }
-
-std::arch::global_asm!("
-.data
-.p2align 3
-saved_sp:
-    .8byte 0
-");
 
 impl Drop for VM {
     fn drop(&mut self) {

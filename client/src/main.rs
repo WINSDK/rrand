@@ -87,7 +87,6 @@ fn load_bin() {
     vm.relocate(&obj).unwrap();
     vm.exec_init_funcs(&obj).unwrap();
 
-    // 0x0000000000003e60
     let exit_code = unsafe { vm.exec(obj.entry()).unwrap() };
     println!("Program exited with code: {exit_code}");
 }
