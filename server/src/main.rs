@@ -1,67 +1,42 @@
-use std::io::{Read, Write};
+use std::io::Read;
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
+use shared::{PublicKey, SecretKey, Error};
 
-use rsa::pkcs8::DecodePublicKey;
-use rsa::{Pkcs1v15Encrypt, RsaPublicKey};
+fn read_bin() -> Vec<u8> {
+    let mut path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    path.push("../ptrace");
 
-#[derive(Debug)]
-pub enum Error {
-    Bind,
-    StreamRead,
-    StreamWrite,
-    StreamClosed,
-    PubkeyCorrupt,
-    Encryption,
+    let mut file = std::fs::File::open(path).unwrap();
+    let mut macho = Vec::new();
+    file.read_to_end(&mut macho).unwrap();
+    macho
 }
 
-struct Payload {
-    macho: Vec<u8>,
-}
+fn handle_client(mut stream: TcpStream, secret_key: &SecretKey, public_key: &PublicKey) -> Result<(), Error> {
+    let sym_key = shared::exchange_keys(&mut stream, secret_key, public_key)?;
 
-// required order for packets:
-//
-// <- pubkey       (plain)
-// -> payload size (encrypted)
-//
-fn handle_client(mut stream: TcpStream, payload: Arc<Payload>) -> Result<(), Error> {
-    let mut rng = rand::thread_rng();
-
-    let mut pubkey = [0; 451];
-    stream
-        .read_exact(&mut pubkey)
-        .map_err(|_| Error::StreamRead)?;
-
-    let pubkey = std::str::from_utf8(&pubkey).map_err(|_| Error::PubkeyCorrupt)?;
-    let pubkey = RsaPublicKey::from_public_key_pem(&pubkey).map_err(|_| Error::PubkeyCorrupt)?;
-    println!("Received pubkey.");
-
-    let payload_len = (payload.macho.len() as u64).to_be_bytes();
-    let payload_len = pubkey
-        .encrypt(&mut rng, Pkcs1v15Encrypt, &payload_len)
-        .map_err(|_| Error::Encryption)?;
-    stream
-        .write_all(&payload_len)
-        .map_err(|_| Error::StreamWrite)?;
-    println!("Send payload size.");
+    let binary = read_bin();
+    shared::net::send(&mut stream, &sym_key, &binary)?;
+    println!("Send binary of size {:#X}.", binary.len());
 
     Ok(())
 }
 
 fn main() -> Result<(), Error> {
-    let payload = Arc::new(Payload {
-        macho: vec![0, 1, 2, 3],
-    });
-
     let listener = TcpListener::bind("0.0.0.0:3771").map_err(|_| Error::Bind)?;
     println!("Listening on port 3771...");
+
+    let (public_key, secret_key) = shared::gen_keypair();
+    let (public_key, secret_key) = (Arc::new(public_key), Arc::new(secret_key));
 
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                let payload = Arc::clone(&payload);
-                std::thread::spawn(|| {
-                    if let Err(err) = handle_client(stream, payload) {
+                let secret_key = Arc::clone(&secret_key);
+                let public_key = Arc::clone(&public_key);
+                std::thread::spawn(move || {
+                    if let Err(err) = handle_client(stream, &secret_key, &public_key) {
                         eprintln!("Client failed with: '{err:?}'.");
                     }
                 });

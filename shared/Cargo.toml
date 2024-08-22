@@ -1,0 +1,11 @@
+[package]
+name = "shared"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+chacha20poly1305 = { version = "0.10.1", features = ["std"], default-features = false }
+hkdf = { version = "0.12", default-features = false }
+p256 = { version = "0.13", features = ["std", "ecdh"], default-features = false }
+rand_core = "0.6"
+sha2 = "0.10"

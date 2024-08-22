@@ -5,5 +5,4 @@ edition = "2021"
 
 [dependencies]
 object = { version = "0.36.3", default-features = false, features = ["std", "read", "macho"] }
-rand = "0.8.5"
-rsa = "0.9.6"
+shared = { path = "../shared" }

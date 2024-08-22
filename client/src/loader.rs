@@ -358,8 +358,6 @@ impl VM {
             clobber_abi("system"),
         );
 
-        println!(":)");
-
         Ok(exit_code)
     }
 }
