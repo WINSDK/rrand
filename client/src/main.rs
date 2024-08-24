@@ -7,8 +7,19 @@ use object::read::macho::MachOFile64;
 use object::LittleEndian as LE;
 use shared::Error;
 
+mod tls;
 mod relocs;
 mod loader;
+
+pub fn parse_base_addr(obj: &MachOFile64<LE>) -> u64 {
+    for segment in obj.segments() {
+        if let Ok(Some(b"__TEXT")) = segment.name_bytes() {
+            return segment.address();
+        }
+    }
+
+    0
+}
 
 fn write_flattened_binary(obj: &MachOFile64<LE>) -> Result<VM, loader::Error> {
     let mut segments = Vec::new();
@@ -36,7 +47,7 @@ fn write_flattened_binary(obj: &MachOFile64<LE>) -> Result<VM, loader::Error> {
         }
         let mut alloc = vm.alloc(bytes.len())?;
         alloc.write_slice(bytes)?;
-        println!("segment allocated at {:#X}", alloc.address());
+        println!("Segment allocated at {:#X}.", alloc.address());
         end_of_prev_segment = addr + bytes.len() as u64;
     }
 
@@ -76,6 +87,7 @@ fn main() -> Result<(), Error> {
     let mut vm = write_flattened_binary(&obj).unwrap();
 
     vm.relocate(&obj).unwrap();
+    vm.set_protection(&obj).unwrap();
     vm.exec_init_funcs(&obj).unwrap();
 
     let exit_code = unsafe { vm.exec(obj.entry()).unwrap() };

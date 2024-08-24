@@ -7,6 +7,3 @@ edition = "2021"
 object = { version = "0.36.3", default-features = false, features = ["std", "read", "macho"] }
 libc = "0.2.155"
 shared = { path = "../shared" }
-
-[build-dependencies]
-cc = "1.0"

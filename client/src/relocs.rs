@@ -298,6 +298,11 @@ fn parse_page_starts_table_starts(page_starts: u64, page_count: u64, data: &[u8]
     page_start_offs
 }
 
+// requires:
+// * __LINKEDIT segment 
+// * LinkeditDataCommand
+// * ordered list of dylibs
+// * base address
 pub fn parse_chained_fixups<'data>(
     obj: &MachOFile64<'data, LE>,
 ) -> Result<Vec<Relocation<'data>>, object::Error> {
