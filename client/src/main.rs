@@ -90,7 +90,8 @@ fn main() -> Result<(), Error> {
     vm.set_protection(&obj).unwrap();
     vm.exec_init_funcs(&obj).unwrap();
 
-    let exit_code = unsafe { vm.exec(obj.entry()).unwrap() };
+    // 0x0000000000002344
+    let exit_code = unsafe { vm.exec(0x0000000000002344).unwrap() };
     println!("Program exited with code: {exit_code}");
 
     Ok(())

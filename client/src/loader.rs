@@ -7,14 +7,14 @@ use std::ptr;
 use std::sync::LazyLock;
 
 use object::read::macho::MachOFile64;
+use object::read::macho::Segment;
 use object::LittleEndian as LE;
 use object::Object;
 use object::ObjectSegment;
 use object::{pod, Pod};
-use object::read::macho::Segment;
 
-use crate::relocs::{parse_chained_fixups, RelocationKind};
 use crate::parse_base_addr;
+use crate::relocs::{parse_chained_fixups, RelocationKind};
 
 pub type ExitCode = i32;
 
@@ -231,7 +231,7 @@ impl VM {
     pub fn set_protection(&mut self, obj: &MachOFile64<LE>) -> Result<(), Error> {
         let base_addr = parse_base_addr(obj);
 
-        for segment in obj.segments().skip(1) {
+        for segment in obj.segments() {
             if let Ok(Some(b"__PAGEZERO")) = segment.name_bytes() {
                 continue;
             }
@@ -239,12 +239,24 @@ impl VM {
             let addr = self.address() + (segment.address() - base_addr);
             let init_prot = segment.macho_segment().initprot(LE) as i32;
 
-            let rflag = if init_prot & libc::VM_PROT_READ != 0 { 'r' } else { '-' };
-            let wflag = if init_prot & libc::VM_PROT_WRITE != 0 { 'w' } else { '-' };
-            let eflag = if init_prot & libc::VM_PROT_EXECUTE != 0 { 'x' } else { '-' };
+            let rflag = if init_prot & libc::VM_PROT_READ != 0 {
+                'r'
+            } else {
+                '-'
+            };
+            let wflag = if init_prot & libc::VM_PROT_WRITE != 0 {
+                'w'
+            } else {
+                '-'
+            };
+            let eflag = if init_prot & libc::VM_PROT_EXECUTE != 0 {
+                'x'
+            } else {
+                '-'
+            };
             println!("Setting prot at {addr:#X} to {rflag}{wflag}{eflag}.");
 
-            unsafe { 
+            unsafe {
                 let res = vm_protect(
                     libc::mach_task_self(),
                     addr as libc::vm_address_t,
@@ -335,13 +347,13 @@ impl VM {
 
 impl Drop for VM {
     fn drop(&mut self) {
-        unsafe { 
+        unsafe {
             let res = libc::vm_deallocate(
                 libc::mach_task_self(),
                 self.region.as_ptr() as libc::vm_address_t,
                 self.region.len() as libc::vm_size_t,
             );
-            
+
             if res != 0 {
                 println!("Failed to deallocate VM memory.");
             }
@@ -360,6 +372,7 @@ struct TLVDescriptor {
 unsafe impl Pod for TLVDescriptor {}
 
 fn load_lib_and_func(library: &str, sym_name: &str) -> Result<u64, Error> {
+    println!("Loading {library} -- {sym_name}.");
     let c_lib = CString::new(library).map_err(|_| Error::LoadLibrary)?;
     let lib = unsafe { libc::dlopen(c_lib.as_ptr(), libc::RTLD_NOW) };
     if lib.is_null() {

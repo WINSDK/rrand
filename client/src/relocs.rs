@@ -1,7 +1,7 @@
 use object::macho::{self, LinkeditDataCommand};
 use object::read::macho::{MachHeader, MachOFile64};
-use object::{Object, ObjectSegment, ReadRef};
 use object::LittleEndian as LE;
+use object::{Object, ObjectSegment, ReadRef};
 
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
@@ -299,7 +299,7 @@ fn parse_page_starts_table_starts(page_starts: u64, page_count: u64, data: &[u8]
 }
 
 // requires:
-// * __LINKEDIT segment 
+// * __LINKEDIT segment
 // * LinkeditDataCommand
 // * ordered list of dylibs
 // * base address
@@ -312,7 +312,6 @@ pub fn parse_chained_fixups<'data>(
         return Ok(relocs);
     };
 
-    let base_addr = 0; // parse_base_addr(obj)?;
     let real_base_addr = parse_base_addr(obj)?;
     let data = obj.data();
     let endian = obj.endian();
@@ -472,12 +471,10 @@ pub fn parse_chained_fixups<'data>(
                             continue;
                         };
 
-                        let target_addr = base_addr + chain_entry_addr;
-
                         if entry.name.is_empty() {
                             println!(
                                 "[macho::parse_chained_fixups] Import table entry at \
-                                      {target_addr:#x} has no entries."
+                                      {chain_entry_addr:#x} has no entries."
                             );
                             continue;
                         }
@@ -485,13 +482,13 @@ pub fn parse_chained_fixups<'data>(
                         let Some(library) = dylibs.get(entry.lib_ordinal as usize) else {
                             println!(
                                 "[macho::parse_chained_fixups] Import table entry at \
-                                     {target_addr:#x} is corrupt."
+                                     {chain_entry_addr:#x} is corrupt."
                             );
                             continue;
                         };
 
                         relocs.push(Relocation {
-                            target: (target_addr + entry.addend) as usize,
+                            target: (chain_entry_addr + entry.addend) as usize,
                             kind: if entry.lib_ordinal == 253 || entry.lib_ordinal == 0 {
                                 RelocationKind::RebaseLocal {
                                     sym_name: entry.name,
@@ -513,13 +510,13 @@ pub fn parse_chained_fixups<'data>(
                             | DYLD_CHAINED_PTR_ARM64E_USERLAND24 => {
                                 let auth = ptr & 1 != 0;
                                 let mut entry_addr = if auth { ptr & 0xFFFF } else { ptr & 0xFFFA };
-                                if starts.pointer_format != DYLD_CHAINED_PTR_ARM64E || auth {
-                                    entry_addr += base_addr;
+                                if starts.pointer_format == DYLD_CHAINED_PTR_ARM64E && !auth {
+                                    entry_addr -= real_base_addr;
                                 }
                                 entry_addr
                             }
-                            DYLD_CHAINED_PTR_64 => ptr & 0x7FFFFFFFFFF,
-                            DYLD_CHAINED_PTR_64_OFFSET => (ptr & 0x7FFFFFFFFFF) + base_addr,
+                            DYLD_CHAINED_PTR_64 => (ptr & 0x7FFFFFFFFFF) - real_base_addr,
+                            DYLD_CHAINED_PTR_64_OFFSET => ptr & 0x7FFFFFFFFFF,
                             DYLD_CHAINED_PTR_64_KERNEL_CACHE
                             | DYLD_CHAINED_PTR_X86_64_KERNEL_CACHE => ptr & 0x3FFFFFFF,
                             DYLD_CHAINED_PTR_32
@@ -538,16 +535,9 @@ pub fn parse_chained_fixups<'data>(
                             }
                         };
 
-                        // FIXME: doesn't handle obj-c
-                        // if objc {
-                        //      add_relocated_pointer(chain_entry_addr, entry_offset);
-                        // }
-
                         relocs.push(Relocation {
-                            kind: RelocationKind::Bind {
-                                value: entry_addr - real_base_addr,
-                            },
-                            target: (chain_entry_addr + base_addr) as usize,
+                            kind: RelocationKind::Bind { value: entry_addr },
+                            target: chain_entry_addr as usize,
                         });
                     }
 
