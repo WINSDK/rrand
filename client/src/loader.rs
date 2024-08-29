@@ -6,14 +6,11 @@ use std::mem;
 use std::ptr;
 use std::sync::LazyLock;
 
-use object::read::macho::MachOFile64;
-use object::read::macho::Segment;
+use object::read::macho::{Section, Segment};
+use object::{macho, pod, Pod, Object, ObjectSegment};
 use object::LittleEndian as LE;
-use object::Object;
-use object::ObjectSegment;
-use object::{pod, Pod};
 
-use crate::parse_base_addr;
+use crate::{MachO, parse_base_addr};
 use crate::relocs::{parse_chained_fixups, RelocationKind};
 
 pub type ExitCode = i32;
@@ -32,7 +29,9 @@ pub enum Error {
     LoadSymbol,
     InitTLV,
     SetMemoryProtection,
-    ParseRelocations,
+    ParseRelocations(object::Error),
+    ParseObjcSELS,
+    NotObjc,
 }
 
 const VM_FLAGS_ANYWHERE: i32 = 0x0001;
@@ -200,8 +199,8 @@ impl VM {
         commit_write_op(self, offset, WriteKind::Copy(bytes))
     }
 
-    pub fn relocate(&mut self, obj: &MachOFile64<LE>) -> Result<(), Error> {
-        for reloc in parse_chained_fixups(&obj).map_err(|_| Error::ParseRelocations)? {
+    pub fn relocate(&mut self, obj: &MachO) -> Result<(), Error> {
+        for reloc in parse_chained_fixups(&obj).map_err(Error::ParseRelocations)? {
             match reloc.kind {
                 RelocationKind::Bind { mut value } => {
                     value += self.address();
@@ -228,7 +227,7 @@ impl VM {
         Ok(())
     }
 
-    pub fn set_protection(&mut self, obj: &MachOFile64<LE>) -> Result<(), Error> {
+    pub fn set_protection(&mut self, obj: &MachO) -> Result<(), Error> {
         let base_addr = parse_base_addr(obj);
 
         for segment in obj.segments() {
@@ -254,7 +253,7 @@ impl VM {
             } else {
                 '-'
             };
-            println!("Setting prot at {addr:#X} to {rflag}{wflag}{eflag}.");
+            println!("Segment at {addr:#X} set to {rflag}{wflag}{eflag}.");
 
             unsafe {
                 let res = vm_protect(
@@ -274,9 +273,25 @@ impl VM {
         Ok(())
     }
 
-    pub fn exec_init_funcs(&mut self, obj: &MachOFile64<LE>) -> Result<(), Error> {
+    // typedef void (*Initializer)(int argc, const char* const argv[], const char* const envp[], const char* const apple[], const ProgramVars* vars);
+    pub fn run_initializers(&mut self, obj: &MachO) -> Result<(), Error> {
         let pm = crate::tls::ParsedMacho::from_obj(obj);
         crate::tls::tlv_initialize_descriptors(&pm, self.address())?;
+
+        for section in &pm.sections {
+            let flags = section.flags(LE);
+
+            if flags & macho::SECTION_TYPE == macho::S_INIT_FUNC_OFFSETS {
+                panic!();
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn init_objc_runtime(&mut self, obj: &MachO) -> Result<(), Error> {
+        let pm = crate::tls::ParsedMacho::from_obj(obj);
+        crate::objc::map_images(&pm, self.address())?;
         Ok(())
     }
 

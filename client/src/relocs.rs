@@ -1,7 +1,9 @@
 use object::macho::{self, LinkeditDataCommand};
-use object::read::macho::{MachHeader, MachOFile64};
+use object::read::macho::MachHeader;
 use object::LittleEndian as LE;
 use object::{Object, ObjectSegment, ReadRef};
+
+use crate::MachO;
 
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
@@ -128,7 +130,7 @@ impl ChainedFixupPointerGeneric {
 }
 
 fn find_required_lcmds<'data>(
-    obj: &MachOFile64<'data, LE>,
+    obj: &MachO<'data>,
 ) -> Result<(Option<&'data LinkeditDataCommand<LE>>, Vec<&'data str>), object::Error> {
     let header = obj.macho_header();
     let endian = obj.endian();
@@ -156,7 +158,7 @@ fn find_required_lcmds<'data>(
     Ok((chained_fixups, dylibs))
 }
 
-fn parse_base_addr(obj: &MachOFile64<LE>) -> Result<u64, object::Error> {
+fn parse_base_addr(obj: &MachO) -> Result<u64, object::Error> {
     // Macho addresses are relative to the __TEXT segment.
     for segment in obj.segments() {
         if let Some(b"__TEXT") = segment.name_bytes()? {
@@ -304,7 +306,7 @@ fn parse_page_starts_table_starts(page_starts: u64, page_count: u64, data: &[u8]
 // * ordered list of dylibs
 // * base address
 pub fn parse_chained_fixups<'data>(
-    obj: &MachOFile64<'data, LE>,
+    obj: &MachO<'data>,
 ) -> Result<Vec<Relocation<'data>>, object::Error> {
     let mut relocs = Vec::new();
 

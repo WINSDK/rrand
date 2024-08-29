@@ -8,10 +8,13 @@ use object::LittleEndian as LE;
 use shared::Error;
 
 mod tls;
+mod objc;
 mod relocs;
 mod loader;
 
-pub fn parse_base_addr(obj: &MachOFile64<LE>) -> u64 {
+pub type MachO<'data> = MachOFile64<'data, LE>;
+
+pub fn parse_base_addr(obj: &MachO) -> u64 {
     for segment in obj.segments() {
         if let Ok(Some(b"__TEXT")) = segment.name_bytes() {
             return segment.address();
@@ -21,7 +24,7 @@ pub fn parse_base_addr(obj: &MachOFile64<LE>) -> u64 {
     0
 }
 
-fn write_flattened_binary(obj: &MachOFile64<LE>) -> Result<VM, loader::Error> {
+fn write_flattened_binary(obj: &MachO) -> Result<VM, loader::Error> {
     let mut segments = Vec::new();
     for segment in obj.segments() {
         if let Ok(Some("__PAGEZERO")) = segment.name() {
@@ -47,7 +50,6 @@ fn write_flattened_binary(obj: &MachOFile64<LE>) -> Result<VM, loader::Error> {
         }
         let mut alloc = vm.alloc(bytes.len())?;
         alloc.write_slice(bytes)?;
-        println!("Segment allocated at {:#X}.", alloc.address());
         end_of_prev_segment = addr + bytes.len() as u64;
     }
 
@@ -75,7 +77,7 @@ fn main() -> Result<(), Error> {
     let binary = shared::net::recv(&mut stream, &sym_key)?;
     println!("Received binary of size {:#X}.", binary.len());
 
-    let obj = MachOFile64::parse(&*binary).unwrap();
+    let obj = MachO::parse(&*binary).unwrap();
 
     for lcmd in obj.macho_load_commands().unwrap() {
         if let Ok(macho::LC_DYLD_INFO | macho::LC_DYLD_INFO_ONLY) = lcmd.map(|cmd| cmd.cmd()) {
@@ -88,7 +90,8 @@ fn main() -> Result<(), Error> {
 
     vm.relocate(&obj).unwrap();
     vm.set_protection(&obj).unwrap();
-    vm.exec_init_funcs(&obj).unwrap();
+    vm.init_objc_runtime(&obj).unwrap();
+    vm.run_initializers(&obj).unwrap();
 
     // 0x0000000000002344
     let exit_code = unsafe { vm.exec(0x0000000000002344).unwrap() };

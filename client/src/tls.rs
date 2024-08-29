@@ -1,11 +1,13 @@
-use crate::loader::Error;
 use std::ffi::c_void;
 use std::mem;
 use std::sync::OnceLock;
 
 use object::macho::{self, Section64};
-use object::read::macho::{MachOFile64, Section};
+use object::read::macho::Section;
 use object::{LittleEndian as LE, Object};
+
+use crate::loader::Error;
+use crate::MachO;
 
 #[derive(Clone)]
 struct Context {
@@ -15,12 +17,12 @@ struct Context {
 
 #[derive(Clone)]
 pub struct ParsedMacho {
-    base_addr: u64,
-    sections: Vec<Section64<LE>>,
+    pub base_addr: u64,
+    pub sections: Vec<Section64<LE>>,
 }
 
 impl ParsedMacho {
-    pub fn from_obj(obj: &MachOFile64<LE>) -> Self {
+    pub fn from_obj(obj: &MachO) -> Self {
         let sections = obj.sections().map(|sec| *sec.macho_section()).collect();
         let base_addr = crate::parse_base_addr(obj);
         Self {
@@ -153,6 +155,9 @@ extern "C" fn tlv_allocate_and_initialize_for_key(key: libc::pthread_key_t) -> *
 
         if flags & macho::SECTION_TYPE == macho::S_THREAD_LOCAL_INIT_FUNCTION_POINTERS {
             let start = real_base_addr + (section.addr(LE) - pm.base_addr);
+            if section.size(LE) == 0 {
+                continue;
+            }
             let len = section.size(LE) as usize / mem::size_of::<extern "C" fn()>();
             let funcs = unsafe { std::slice::from_raw_parts(start as *const extern "C" fn(), len) };
             for func in funcs {
