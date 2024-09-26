@@ -47,59 +47,6 @@ extern "C" {
     ) -> libc::kern_return_t;
 }
 
-#[used]
-#[link_section = "__DATA_CONST,__pth_jit_func"]
-static PTHREAD_JIT_WRITE_CALLBACK_ALLOWLIST: &[libc::pthread_jit_write_callback_t] =
-    &[Some(writing_callback), None];
-
-enum WriteKind<'a> {
-    Copy(&'a [u8]),
-    Set { val: u8, size: usize },
-}
-
-struct WriteOp<'a> {
-    vm: &'a mut VM,
-    offset: usize,
-    kind: WriteKind<'a>,
-}
-
-extern "C" fn writing_callback(ctx: *mut c_void) -> i32 {
-    let WriteOp {
-        vm,
-        offset,
-        kind: ty,
-    } = unsafe { &mut *(ctx as *mut WriteOp) };
-
-    match ty {
-        WriteKind::Copy(bytes) => {
-            vm.region[*offset..][..bytes.len()].copy_from_slice(bytes);
-        }
-        WriteKind::Set { val, size } => {
-            vm.region[*offset..][..*size].fill(*val);
-        }
-    }
-    0
-}
-
-fn commit_write_op(vm: &mut VM, offset: usize, kind: WriteKind) -> Result<(), Error> {
-    match kind {
-        WriteKind::Copy(bytes) => {
-            if offset + bytes.len() >= vm.region.len() {
-                return Err(Error::OutOfBoundWrite);
-            }
-        }
-        _ => {}
-    }
-
-    unsafe {
-        let mut write_op = WriteOp { vm, offset, kind };
-        let write_op = std::mem::transmute(&mut write_op);
-        libc::pthread_jit_write_with_callback_np(Some(writing_callback), write_op);
-    }
-
-    Ok(())
-}
-
 pub struct Allocation<'a> {
     vm: &'a mut VM,
     offset: usize,
@@ -112,15 +59,11 @@ impl Allocation<'_> {
     }
 
     pub fn write_slice(&mut self, bytes: &[u8]) -> Result<(), Error> {
-        commit_write_op(self.vm, self.offset, WriteKind::Copy(bytes))
+        self.vm.write_slice(self.offset, bytes)
     }
 
     pub fn set_value(&mut self, val: u8) {
-        let kind = WriteKind::Set {
-            val,
-            size: self.size,
-        };
-        let _ = commit_write_op(self.vm, self.offset, kind);
+        let _ = self.vm.set_value(self.offset, self.size, val);
     }
 
     pub fn address(&self) -> u64 {
@@ -169,6 +112,11 @@ impl VM {
         self.region.get(addr..)?.get(..size)
     }
 
+    #[inline]
+    fn checked_get_mut(&mut self, addr: usize, size: usize) -> Option<&mut [u8]> {
+        self.region.get_mut(addr..)?.get_mut(..size)
+    }
+
     pub fn alloc(&mut self, size: usize) -> Result<Allocation, Error> {
         self.checked_get(self.offset, size)
             .ok_or(Error::OutOfMemory)?;
@@ -199,7 +147,19 @@ impl VM {
     }
 
     pub fn write_slice(&mut self, offset: usize, bytes: &[u8]) -> Result<(), Error> {
-        commit_write_op(self, offset, WriteKind::Copy(bytes))
+        self
+            .checked_get_mut(offset, bytes.len())
+            .ok_or(Error::OutOfBoundWrite)?
+            .copy_from_slice(bytes);
+        Ok(())
+    }
+
+    pub fn set_value(&mut self, offset: usize, size: usize, val: u8) -> Result<(), Error> {
+        self
+            .checked_get_mut(offset, size)
+            .ok_or(Error::OutOfBoundWrite)?
+            .fill(val);
+        Ok(())
     }
 
     pub fn relocate(&mut self, obj: &MachO) -> Result<(), Error> {
