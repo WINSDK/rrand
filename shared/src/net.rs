@@ -7,12 +7,22 @@ use crate::Error;
 
 pub fn send(stream: &mut TcpStream, key: &Key, plaintext: &[u8]) -> Result<(), Error> {
     let (nonce, ciphertext) = super::encrypt_data(plaintext, key)?;
+    let cipher_len = (ciphertext.len() as u64).to_le_bytes();
 
+    let mut hasher = blake3::Hasher::default();
+    hasher.update(&nonce);
+    hasher.update(&cipher_len);
+    hasher.update(&ciphertext);
+    let hash = hasher.finalize();
+
+    stream
+        .write_all(hash.as_bytes())
+        .map_err(|_| Error::StreamWrite)?;
     stream
         .write_all(&nonce)
         .map_err(|_| Error::StreamWrite)?;
     stream
-        .write_all(&(ciphertext.len() as u64).to_le_bytes())
+        .write_all(&cipher_len)
         .map_err(|_| Error::StreamWrite)?;
     stream
         .write_all(&ciphertext)
@@ -22,23 +32,39 @@ pub fn send(stream: &mut TcpStream, key: &Key, plaintext: &[u8]) -> Result<(), E
 }
 
 pub fn recv(stream: &mut TcpStream, key: &Key) -> Result<Vec<u8>, Error> {
+    let mut hash = [0; blake3::OUT_LEN];
+    stream
+        .read_exact(hash.as_mut_slice())
+        .map_err(|_| Error::StreamRead)?;
+
     let mut nonce = Nonce::default();
     stream
         .read_exact(nonce.as_mut_slice())
         .map_err(|_| Error::StreamRead)?;
 
-    let mut cipher_len = [0; 8];
+    let mut cipher_len_bytes = [0; 8];
     stream
-        .read_exact(&mut cipher_len)
+        .read_exact(&mut cipher_len_bytes)
         .map_err(|_| Error::StreamRead)?;
-    let cipher_len = u64::from_le_bytes(cipher_len) as usize;
+    let cipher_len = u64::from_le_bytes(cipher_len_bytes) as usize;
 
     let mut ciphertext = vec![0; cipher_len];
     stream
         .read_exact(&mut ciphertext)
         .map_err(|_| Error::StreamRead)?;
 
-    super::decrypt_data(&ciphertext, key, &nonce)
+    let mut hasher = blake3::Hasher::default();
+    hasher.update(&nonce);
+    hasher.update(&cipher_len_bytes);
+    hasher.update(&ciphertext);
+    let computed_hash = hasher.finalize();
+
+    if &hash != computed_hash.as_bytes() {
+        return Err(Error::StreamCorruption);
+    }
+
+    let plaintext = super::decrypt_data(&ciphertext, key, &nonce)?;
+    Ok(plaintext)
 }
 
 pub (crate) fn send_pubkey(stream: &mut TcpStream, public_key: &PublicKey) -> Result<(), Error> {

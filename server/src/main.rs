@@ -1,11 +1,11 @@
+use shared::{Error, PublicKey, SecretKey};
 use std::io::Read;
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
-use shared::{PublicKey, SecretKey, Error};
 
 fn read_bin() -> Vec<u8> {
     let mut path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    path.push("../ptrace");
+    path.push("../bundle");
 
     let mut file = std::fs::File::open(path).unwrap();
     let mut macho = Vec::new();
@@ -13,7 +13,11 @@ fn read_bin() -> Vec<u8> {
     macho
 }
 
-fn handle_client(mut stream: TcpStream, secret_key: &SecretKey, public_key: &PublicKey) -> Result<(), Error> {
+fn handle_client(
+    mut stream: TcpStream,
+    secret_key: &SecretKey,
+    public_key: &PublicKey,
+) -> Result<(), Error> {
     let sym_key = shared::exchange_keys(&mut stream, secret_key, public_key)?;
 
     let binary = read_bin();

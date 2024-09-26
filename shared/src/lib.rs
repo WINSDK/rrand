@@ -16,6 +16,7 @@ pub enum Error {
     StreamRead,
     StreamWrite,
     StreamClosed,
+    StreamCorruption,
     PubkeyCorrupt,
     Encryption,
     Decription,
