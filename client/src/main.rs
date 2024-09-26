@@ -9,6 +9,7 @@ use shared::Error;
 
 mod tls;
 mod objc;
+mod objc_ffi;
 mod relocs;
 mod loader;
 

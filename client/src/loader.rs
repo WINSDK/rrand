@@ -31,7 +31,6 @@ pub enum Error {
     SetMemoryProtection,
     ParseRelocations(object::Error),
     ParseObjcSELS,
-    NotObjc,
 }
 
 const VM_FLAGS_ANYWHERE: i32 = 0x0001;
@@ -152,6 +151,10 @@ impl VM {
 
             let region = std::slice::from_raw_parts_mut(region as *mut u8, size);
             let region: &'static mut [u8] = std::mem::transmute(region);
+
+            if cfg!(debug_assertions) {
+                region.fill(0x00);
+            }
 
             Ok(Self { region, offset: 0 })
         }
@@ -291,7 +294,7 @@ impl VM {
 
     pub fn init_objc_runtime(&mut self, obj: &MachO) -> Result<(), Error> {
         let pm = crate::tls::ParsedMacho::from_obj(obj);
-        crate::objc::map_images(&pm, self.address())?;
+        unsafe { crate::objc::map_images(&pm, self.address())? };
         Ok(())
     }
 
@@ -320,7 +323,7 @@ impl VM {
         sys_icache_invalidate(base_addr as *mut c_void, self.region.len());
 
         let entrypoint = base_addr + entrypoint;
-        println!("Entering entrypoint at {entrypoint:#X}");
+        println!("Entering entrypoint at {entrypoint:#x}");
 
         let mut exit_code: i32;
 

@@ -2,8 +2,8 @@ use std::ffi::c_void;
 use std::mem;
 use std::sync::OnceLock;
 
-use object::macho::{self, Section64};
-use object::read::macho::Section;
+use object::macho::{self, MachHeader64, Section64};
+use object::read::macho::{MachHeader, Section};
 use object::{LittleEndian as LE, Object};
 
 use crate::loader::Error;
@@ -18,16 +18,16 @@ struct Context {
 #[derive(Clone)]
 pub struct ParsedMacho {
     pub base_addr: u64,
+    pub header: MachHeader64<LE>,
     pub sections: Vec<Section64<LE>>,
 }
 
 impl ParsedMacho {
     pub fn from_obj(obj: &MachO) -> Self {
-        let sections = obj.sections().map(|sec| *sec.macho_section()).collect();
-        let base_addr = crate::parse_base_addr(obj);
         Self {
-            base_addr,
-            sections,
+            base_addr: crate::parse_base_addr(obj),
+            header: *obj.macho_header(),
+            sections: obj.sections().map(|sec| *sec.macho_section()).collect(),
         }
     }
 }
