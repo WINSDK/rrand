@@ -1,2 +1,12 @@
 rrand
 =====
+
+Usage:
+1. Bundle example bundle to load:
+   clang++ -bundle -framework Foundation -framework AppKit example_bundle.mm -o bundle
+
+2. Run server:
+   cd server && cargo r
+
+3. Run client:
+   cd client && cargo r

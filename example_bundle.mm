@@ -2,21 +2,20 @@
 #include <iostream>
 #include <string>
 
-// A simple C++ function
 std::string getGreeting() {
     return "Hello from C++!";
 }
 
-// AppDelegate Interface (Objective-C++)
+// AppDelegate Interface (Objective-C++).
 @interface AppDelegate : NSObject <NSApplicationDelegate>
 @end
 
-// AppDelegate Implementation (Objective-C++)
+// AppDelegate Implementation (Objective-C++).
 @implementation AppDelegate
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
-    std::cout << getGreeting() << std::endl;  // Call the C++ function and print the greeting
+    std::cout << getGreeting() << std::endl;
 
-    // Create a window programmatically
+    // Create a window.
     NSRect frame = NSMakeRect(100, 100, 400, 300);
     NSUInteger style = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskResizable;
     NSWindow *window = [[NSWindow alloc] initWithContentRect:frame
@@ -34,7 +33,7 @@ std::string getGreeting() {
 
 int main(int argc, const char * argv[]) {
     @autoreleasepool {
-        // Create and run the application
+        // Create and run the application.
         NSApplication *app = [NSApplication sharedApplication];
         AppDelegate *delegate = [[AppDelegate alloc] init];
         [app setDelegate:delegate];
