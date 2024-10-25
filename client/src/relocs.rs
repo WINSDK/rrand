@@ -93,6 +93,7 @@ pub enum RelocationKind<'data> {
     Bind {
         value: u64,
     },
+    #[allow(dead_code)]
     RebaseLocal {
         sym_name: &'data str,
         weak: bool,

@@ -55,7 +55,7 @@ pub unsafe fn map_images(pm: &ParsedMacho, real_base_addr: u64) -> Result<(), Er
     Ok(())
 }
 
-unsafe fn register_class(registered: &mut HashSet<&CStr>, class_ptr: *mut class_t) {
+unsafe fn register_class(_registered: &mut HashSet<&CStr>, class_ptr: *mut class_t) {
     let class = &*class_ptr;
 
     // Parse class data.

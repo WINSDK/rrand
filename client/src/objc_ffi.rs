@@ -20,8 +20,6 @@ extern "C" {
         extraBytes: usize
     ) -> *mut class_t;
 
-    pub fn class_getName(class: *mut class_t) -> *const i8;
-
     pub fn class_addProtocol(
         cls: *mut class_t, 
         proto: *const protocol_t

@@ -85,7 +85,7 @@ impl VM {
                 libc::mach_task_self(),
                 &mut region,
                 size,
-                libc::VM_FLAGS_ANYWHERE,
+                VM_FLAGS_ANYWHERE,
             );
 
             if res != 0 {
@@ -258,7 +258,7 @@ impl VM {
         Ok(())
     }
 
-    pub unsafe fn exec(mut self, entrypoint: u64) -> Result<ExitCode, Error> {
+    pub unsafe fn exec(self, entrypoint: u64) -> Result<ExitCode, Error> {
         let envp: Vec<CString> = std::env::vars()
             .flat_map(|(key, val)| CString::new(format!("{key}={val}")))
             .collect();
