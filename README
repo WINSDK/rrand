@@ -1,9 +1,25 @@
 rrand
 =====
 
+Remote Mach-O bundle loader for macOS (cool idea, over engineered example).
+A server sends an encrypted binary over TCP to a client, which loads and executes it in-process.
+
+- shared/
+  ECDH key exchange, Poly1305 encryption, BLAKE3 for checksums.
+
+- server/
+  Listens on port 3771, performs key exchange, sends the encrypted Mach-O bundle.
+
+- client/
+  1. Receives and decrypts the bundle
+  2. Maps segments into memory
+  3. Applies chained fixup relocations
+  4. Initializes the Objective-C runtime and TLS
+  4. Jumps to entrypoint
+
 Usage:
-1. Bundle example bundle to load:
-   clang++ -bundle -framework Foundation -framework AppKit example_bundle.mm -o bundle
+1. Build a bundle to load:
+   clang++ -bundle -framework Foundation -framework AppKit example_bundle.mm -o pthread
 
 2. Run server:
    cd server && cargo r
